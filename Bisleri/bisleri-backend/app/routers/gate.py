@@ -903,3 +903,244 @@ def get_operational_data_summary(
     except Exception as e:
         print(f"Error getting operational summary: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Summary error: {str(e)}")
+    
+
+# Sync routes below
+
+# ADD THESE ENDPOINTS TO YOUR EXISTING app/routers/gate.py
+
+@router.get("/available-documents/{vehicle_no}")
+def get_available_documents(
+    vehicle_no: str,
+    db: Session = Depends(get_db),
+    current_user: UsersMaster = Depends(get_current_user)
+):
+    """Get available documents for vehicle from last 1 hour without gate_entry_no"""
+    
+    if not vehicle_no.strip():
+        raise HTTPException(status_code=400, detail="Vehicle number cannot be empty")
+    
+    clean_vehicle_no = vehicle_no.strip().upper()
+    
+    try:
+        query = text("""
+            SELECT document_no, document_type, document_date, 
+                   customer_name, total_quantity, transporter_name,
+                   e_way_bill_no, route_code
+            FROM document_data
+            WHERE vehicle_no = :vehicle_no
+            AND (gate_entry_no IS NULL OR gate_entry_no = '')
+            AND document_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '1 hour'
+            ORDER BY document_date DESC
+        """)
+        
+        result = db.execute(query, {"vehicle_no": clean_vehicle_no})
+        documents = result.fetchall()
+        
+        document_list = []
+        for doc in documents:
+            document_list.append({
+                "document_no": doc.document_no,
+                "document_type": doc.document_type,
+                "document_date": doc.document_date.isoformat() if doc.document_date else None,
+                "customer_name": doc.customer_name,
+                "total_quantity": doc.total_quantity,
+                "transporter_name": doc.transporter_name,
+                "e_way_bill_no": doc.e_way_bill_no,
+                "route_code": doc.route_code
+            })
+        
+        return {
+            "vehicle_no": clean_vehicle_no,
+            "count": len(document_list),
+            "documents": document_list,
+            "search_window": "Last 1 hour",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@router.post("/assign-document")
+def assign_document_to_manual_entry(
+    assignment: dict,  # {insights_record_id: int, document_no: str}
+    db: Session = Depends(get_db),
+    current_user: UsersMaster = Depends(get_current_user)
+):
+    """Assign document to manual entry row"""
+    
+    try:
+        insights_record = db.query(InsightsData).filter(
+            InsightsData.id == assignment["insights_record_id"]
+        ).first()
+        
+        if not insights_record:
+            raise HTTPException(status_code=404, detail="Manual entry record not found")
+        
+        # Check 12-hour assignment window
+        entry_datetime = datetime.combine(insights_record.date, insights_record.time)
+        time_elapsed = datetime.now() - entry_datetime
+        
+        if time_elapsed.total_seconds() > 12 * 60 * 60:
+            raise HTTPException(
+                status_code=403, 
+                detail="Assignment window expired. Documents can only be assigned within 12 hours."
+            )
+        
+        # Check if already assigned
+        if insights_record.document_type and insights_record.document_type != "Manual Entry":
+            raise HTTPException(status_code=400, detail="This manual entry already has a document assigned")
+        
+        # Get document
+        document = db.query(DocumentData).filter(
+            DocumentData.document_no == assignment["document_no"]
+        ).first()
+        
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Check if document already assigned
+        if document.gate_entry_no and document.gate_entry_no.strip():
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Document {assignment['document_no']} is already assigned to gate entry {document.gate_entry_no}"
+            )
+        
+        # Verify vehicle numbers match
+        if document.vehicle_no.upper() != insights_record.vehicle_no.upper():
+            raise HTTPException(
+                status_code=400, 
+                detail="Vehicle number mismatch. Please verify vehicle details"
+            )
+        
+        # Update insights_data
+        insights_record.document_type = document.document_type
+        insights_record.sub_document_type = document.sub_document_type
+        insights_record.document_date = document.document_date
+        insights_record.last_edited_at = datetime.now()
+        insights_record.edit_count = (insights_record.edit_count or 0) + 1
+        
+        # Update document_data
+        document.gate_entry_no = insights_record.gate_entry_no
+        
+        db.commit()
+        
+        return {
+            "message": "Document assigned successfully",
+            "insights_record_id": assignment["insights_record_id"],
+            "document_no": assignment["document_no"],
+            "gate_entry_no": insights_record.gate_entry_no,
+            "assigned_at": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Assignment failed: {str(e)}")
+
+@router.post("/multiple-manual-entry")
+def create_multiple_manual_entries(
+    entry: dict,  # {gate_type, vehicle_no, number_of_documents, driver_name, km_reading, loader_names, remarks}
+    db: Session = Depends(get_db),
+    current_user: UsersMaster = Depends(get_current_user)
+):
+    """Create multiple manual entries - NO DOCUMENT LIMIT"""
+    
+    try:
+        if not entry["vehicle_no"].strip():
+            raise HTTPException(status_code=400, detail="Vehicle number is required")
+        
+        # ✅ REMOVED: Document count limit check
+        if entry["number_of_documents"] < 1:
+            raise HTTPException(status_code=400, detail="Number of documents must be at least 1")
+        
+        vehicle_no = entry["vehicle_no"].strip().upper()
+        
+        # Gate sequence validation
+        last_entry = db.query(InsightsData).filter(
+            InsightsData.vehicle_no == vehicle_no
+        ).order_by(InsightsData.date.desc(), InsightsData.time.desc()).first()
+        
+        if last_entry and last_entry.movement_type == entry["gate_type"]:
+            movement_type = "Gate-In" if entry["gate_type"] == "Gate-In" else "Gate-Out"
+            raise HTTPException(
+                status_code=400,
+                detail=f"Vehicle {vehicle_no} already has {movement_type}. Must do opposite movement first."
+            )
+        
+        # Generate gate entry number
+        gate_entry_no = generate_gate_entry_no_for_user(current_user.username)
+        if not gate_entry_no:
+            raise HTTPException(status_code=500, detail="Failed to generate gate entry number")
+        
+        now = datetime.now()
+        warehouse_name = getattr(current_user, 'warehouse_name', f"Warehouse-{current_user.warehouse_code}")
+        
+        # Create multiple entries
+        for i in range(entry["number_of_documents"]):
+            insight_record = InsightsData(
+                gate_entry_no=gate_entry_no,
+                document_type="Manual Entry",
+                sub_document_type="Pending Assignment",
+                vehicle_no=vehicle_no,
+                warehouse_name=warehouse_name,
+                date=now.date(),
+                time=now.time(),
+                movement_type=entry["gate_type"],
+                remarks=entry.get("remarks") or f"Manual {entry['gate_type']} - Document {i+1}/{entry['number_of_documents']}",
+                warehouse_code=current_user.warehouse_code,
+                site_code=current_user.site_code,
+                security_name=f"{current_user.first_name} {current_user.last_name}",
+                security_username=current_user.username,
+                document_date=now,
+                driver_name=entry.get("driver_name"),
+                km_reading=entry.get("km_reading"),
+                loader_names=entry.get("loader_names"),
+                edit_count=0,
+                last_edited_at=now if any([entry.get("driver_name"), entry.get("km_reading"), entry.get("loader_names")]) else None
+            )
+            db.add(insight_record)
+        
+        db.commit()
+        
+        return {
+            "message": f"Successfully created {entry['number_of_documents']} manual entries",
+            "gate_entry_no": gate_entry_no,
+            "records_created": entry["number_of_documents"],
+            "vehicle_no": vehicle_no,
+            "movement_type": entry["gate_type"],
+            "assignment_expires_at": (now + timedelta(hours=12)).isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@router.get("/unassigned-count")
+def get_unassigned_documents_count(
+    db: Session = Depends(get_db),
+    current_user: UsersMaster = Depends(get_current_user)
+):
+    """Get count of manual entries needing document assignment"""
+    try:
+        base_query = db.query(InsightsData)
+        
+        # Filter by warehouse for non-admins
+        if current_user.role != "Admin":
+            base_query = base_query.filter(InsightsData.warehouse_code == current_user.warehouse_code)
+        
+        # Count pending assignments within 12 hours
+        twelve_hours_ago = datetime.now() - timedelta(hours=12)
+        count = base_query.filter(
+            InsightsData.date >= twelve_hours_ago.date(),
+            InsightsData.document_type == "Manual Entry",
+            InsightsData.sub_document_type == "Pending Assignment"
+        ).count()
+        
+        return {"unassigned_count": count}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Count error: {str(e)}")
