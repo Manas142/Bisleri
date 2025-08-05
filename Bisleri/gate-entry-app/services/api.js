@@ -172,6 +172,46 @@ export const gateAPI = {
     const response = await api.get('/operational-summary');
     return response.data;
   },
+
+   // Create multiple manual entries (NO DOCUMENT LIMIT)
+  createMultipleManualEntries: async (entryData) => {
+    if (!entryData.vehicle_no?.trim()) {
+      throw new Error('Vehicle number is required');
+    }
+    
+    if (!entryData.number_of_documents || entryData.number_of_documents < 1) {
+      throw new Error('Number of documents must be at least 1');
+    }
+    
+    const response = await api.post('/multiple-manual-entry', entryData);
+    return response.data;
+  },
+
+  // Get available documents for assignment
+  getAvailableDocuments: async (vehicleNo) => {
+    if (!vehicleNo?.trim()) {
+      throw new Error('Vehicle number is required');
+    }
+    
+    const response = await api.get(`/available-documents/${vehicleNo.trim()}`);
+    return response.data;
+  },
+
+  // Assign document to manual entry
+  assignDocument: async (assignmentData) => {
+    if (!assignmentData.insights_record_id || !assignmentData.document_no) {
+      throw new Error('Both record ID and document number are required');
+    }
+    
+    const response = await api.post('/assign-document', assignmentData);
+    return response.data;
+  },
+
+  // Get unassigned documents count
+  getUnassignedCount: async () => {
+    const response = await api.get('/unassigned-count');
+    return response.data;
+  }
 };
 
 // ✅ ENHANCED: Insights APIs with Operational Edit Functionality
@@ -263,6 +303,8 @@ export const operationalValidation = {
     
     return { isValid: true, value: trimmed };
   },
+
+
 
   validateKMReading: (kmReading, movementType) => {
     if (!kmReading || !kmReading.trim()) {
@@ -362,7 +404,39 @@ export const operationalValidation = {
     };
   }
 };
+// ✅ ADD: Form Validation (NO DOCUMENT LIMIT) - PUT THIS RIGHT HERE
+export const formValidation = {
+  validateMultipleManualEntry: (formData) => {
+    const errors = {};
 
+    if (!formData.vehicle_no || !formData.vehicle_no.trim()) {
+      errors.vehicle_no = 'Vehicle number is required';
+    }
+
+    if (!formData.number_of_documents) {
+      errors.number_of_documents = 'Number of documents is required';
+    } else if (parseInt(formData.number_of_documents) < 1) {
+      errors.number_of_documents = 'Must be at least 1 document';
+    }
+
+    return {
+      isValid: Object.keys(errors).length === 0,
+      errors
+    };
+  },
+
+  formatMultipleEntryData: (formData) => {
+    return {
+      gate_type: formData.gateType || 'Gate-In',
+      vehicle_no: formData.vehicleNo.trim().toUpperCase(),
+      number_of_documents: parseInt(formData.numberOfDocuments),
+      remarks: formData.remarks?.trim() || null,
+      driver_name: formData.driverName?.trim() || null,
+      km_reading: formData.kmReading?.trim() || null,
+      loader_names: formData.loaderNames?.trim() || null
+    };
+  }
+};
 // ✅ NEW: Edit status utilities for 3-color button system
 export const editStatusUtils = {
   // Get button configuration based on record status
@@ -876,3 +950,43 @@ console.log('API Configuration:', {
 });
 
 export default api;
+
+
+// ✅ ADD: Document Assignment Helper Functions
+export const assignmentHelpers = {
+  // Check if record needs assignment
+  needsDocumentAssignment: (record) => {
+    return record.document_type === "Manual Entry" && 
+           record.sub_document_type === "Pending Assignment";
+  },
+
+  // Check if assignment window is open (12 hours)
+  isAssignmentWindowOpen: (record) => {
+    try {
+      const entryDateTime = new Date(`${record.date}T${record.time}`);
+      const now = new Date();
+      const timeDiff = now - entryDateTime;
+      return timeDiff <= 12 * 60 * 60 * 1000; // 12 hours in ms
+    } catch (error) {
+      return false;
+    }
+  },
+
+  // Get remaining time for assignment
+  getAssignmentTimeRemaining: (record) => {
+    try {
+      const entryDateTime = new Date(`${record.date}T${record.time}`);
+      const now = new Date();
+      const timeDiff = 12 * 60 * 60 * 1000 - (now - entryDateTime);
+      
+      if (timeDiff <= 0) return null;
+      
+      const hours = Math.floor(timeDiff / (60 * 60 * 1000));
+      const minutes = Math.floor((timeDiff % (60 * 60 * 1000)) / (60 * 1000));
+      
+      return `${hours}h ${minutes}m`;
+    } catch (error) {
+      return null;
+    }
+  }
+};

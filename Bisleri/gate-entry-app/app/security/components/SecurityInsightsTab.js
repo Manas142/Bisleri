@@ -1,4 +1,4 @@
-// app/security/components/SecurityInsightsTab.js - UPDATED WITH 3-COLOR EDIT SYSTEM
+// app/security/components/SecurityInsightsTab.js - INLINE DROPDOWN VERSION
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Platform } from 'react-native';
 import styles from '../styles/insightsStyles';
@@ -16,10 +17,7 @@ import { insightsAPI, handleAPIError, editStatusUtils } from '../../../services/
 import { getCurrentUser } from '../../../utils/jwtUtils';
 import OperationalEditModal from './OperationalEditModal';
 
-const SecurityInsightsTab = ({ 
-  insightsData, 
-  onDataChange 
-}) => {
+const SecurityInsightsTab = ({ insightsData, onDataChange }) => {
   // State management
   const [loading, setLoading] = useState(false);
   const [movements, setMovements] = useState([]);
@@ -28,23 +26,26 @@ const SecurityInsightsTab = ({
   const [editingRecord, setEditingRecord] = useState(null);
   const [editStatistics, setEditStatistics] = useState(null);
 
+  // ✅ NEW: Unassigned count and assignment states
+  const [unassignedCount, setUnassignedCount] = useState(0);
+  const [availableDocuments, setAvailableDocuments] = useState({});
+  const [selectedDocuments, setSelectedDocuments] = useState({});
+  const [assignmentLoading, setAssignmentLoading] = useState({});
+
   // Date picker states
   const [showFromDatePicker, setShowFromDatePicker] = useState(false);
   const [showToDatePicker, setShowToDatePicker] = useState(false);
   const [fromDate, setFromDate] = useState(new Date());
   const [toDate, setToDate] = useState(new Date());
-
-  // Vehicle filter state
   const [vehicleFilter, setVehicleFilter] = useState('');
 
-  // Load initial data
   useEffect(() => {
     loadUserData();
     loadMovements();
     loadEditStatistics();
+    loadUnassignedCount(); // ✅ NEW
   }, []);
 
-  // Helper function to format date as YYYY-MM-DD for API
   const formatDateForAPI = (date) => {
     const year = date.getFullYear();
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
@@ -52,7 +53,6 @@ const SecurityInsightsTab = ({
     return `${year}-${month}-${day}`;
   };
 
-  // Helper function to format date as DD-MM-YYYY for display
   const formatDateToDDMMYYYY = (date) => {
     const day = date.getDate().toString().padStart(2, '0');
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
@@ -69,7 +69,6 @@ const SecurityInsightsTab = ({
     }
   };
 
-  // ✅ NEW: Load edit statistics
   const loadEditStatistics = async () => {
     try {
       const stats = await insightsAPI.getEditStatistics();
@@ -79,7 +78,21 @@ const SecurityInsightsTab = ({
     }
   };
 
-  // ✅ UPDATED: Load movements with enhanced edit status
+  // ✅ NEW: Load unassigned count
+  const loadUnassignedCount = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/unassigned-count`, {
+        headers: {
+          'Authorization': `Bearer ${await SecureStore.getItemAsync('access_token')}`
+        }
+      });
+      const data = await response.json();
+      setUnassignedCount(data.unassigned_count);
+    } catch (error) {
+      console.error('Error loading unassigned count:', error);
+    }
+  };
+
   const loadMovements = async () => {
     setLoading(true);
     try {
@@ -93,8 +106,16 @@ const SecurityInsightsTab = ({
 
       const response = await insightsAPI.getFilteredMovements(filter);
       
-      // ✅ NEW: Sort by edit priority (Yellow -> Green -> Black)
-      const sortedMovements = editStatusUtils.sortByEditPriority(response.results || []);
+      // Sort by assignment priority
+      const sortedMovements = (response.results || []).sort((a, b) => {
+        const aNeedsAssignment = a.document_type === "Manual Entry" && a.sub_document_type === "Pending Assignment";
+        const bNeedsAssignment = b.document_type === "Manual Entry" && b.sub_document_type === "Pending Assignment";
+        
+        if (aNeedsAssignment && !bNeedsAssignment) return -1;
+        if (!aNeedsAssignment && bNeedsAssignment) return 1;
+        return 0;
+      });
+      
       setMovements(sortedMovements);
       
     } catch (error) {
@@ -109,84 +130,237 @@ const SecurityInsightsTab = ({
   // Date picker handlers
   const onFromDateChange = (event, selectedDate) => {
     setShowFromDatePicker(Platform.OS === 'ios');
-    if (selectedDate) {
-      setFromDate(selectedDate);
-    }
+    if (selectedDate) setFromDate(selectedDate);
   };
 
   const onToDateChange = (event, selectedDate) => {
     setShowToDatePicker(Platform.OS === 'ios');
-    if (selectedDate) {
-      setToDate(selectedDate);
-    }
+    if (selectedDate) setToDate(selectedDate);
   };
 
-  // Apply filters and reload data
   const handleApplyFilters = () => {
     loadMovements();
     loadEditStatistics();
+    loadUnassignedCount(); // ✅ NEW
   };
 
-  // ✅ NEW: Enhanced stats calculation with operational focus
-  const stats = React.useMemo(() => {
-    if (!movements || movements.length === 0) {
-      return {
-        totalMovements: 0,
-        uniqueVehicles: 0,
-        needsCompletion: 0,
-        completeAndEditable: 0,
-        expired: 0,
-        averageCompletionTime: 0
-      };
-    }
-    
-    const uniqueVehicles = [...new Set(movements.map(m => m.vehicle_no))].length;
-    const needsCompletion = movements.filter(m => 
-      editStatusUtils.getButtonConfig(m).action === 'complete_required'
-    ).length;
-    const completeAndEditable = movements.filter(m => 
-      editStatusUtils.getButtonConfig(m).action === 'edit_optional'
-    ).length;
-    const expired = movements.filter(m => 
-      editStatusUtils.getButtonConfig(m).action === 'view_only'
-    ).length;
-    
-    return {
-      totalMovements: movements.length,
-      uniqueVehicles,
-      needsCompletion,
-      completeAndEditable,
-      expired,
-      averageCompletionTime: editStatistics?.avg_edits_per_record || 0
-    };
-  }, [movements, editStatistics]);
+  // ✅ NEW: Load available documents for dropdown
+  const loadAvailableDocuments = async (vehicleNo, recordId) => {
+    if (availableDocuments[recordId]) return;
 
-  // ✅ NEW: Open edit modal with record
+    setAssignmentLoading(prev => ({ ...prev, [recordId]: true }));
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/available-documents/${vehicleNo}`, {
+        headers: {
+          'Authorization': `Bearer ${await SecureStore.getItemAsync('access_token')}`
+        }
+      });
+      const data = await response.json();
+      
+      setAvailableDocuments(prev => ({
+        ...prev,
+        [recordId]: data.documents || []
+      }));
+      
+    } catch (error) {
+      console.error('Error loading available documents:', error);
+    } finally {
+      setAssignmentLoading(prev => ({ ...prev, [recordId]: false }));
+    }
+  };
+
+  // ✅ NEW: Handle document assignment
+  const handleDocumentAssignment = async (recordId, documentNo) => {
+    if (!recordId || !documentNo) {
+      Alert.alert('Error', 'Please select a document to assign');
+      return;
+    }
+
+    setAssignmentLoading(prev => ({ ...prev, [recordId]: true }));
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/assign-document`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${await SecureStore.getItemAsync('access_token')}`
+        },
+        body: JSON.stringify({
+          insights_record_id: recordId,
+          document_no: documentNo
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Assignment failed');
+      }
+
+      const result = await response.json();
+      
+      Alert.alert(
+        'Success',
+        `Document ${documentNo} assigned successfully!`,
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              loadMovements();
+              loadUnassignedCount();
+              
+              // Clear cached data
+              setAvailableDocuments(prev => {
+                const newDocs = { ...prev };
+                delete newDocs[recordId];
+                return newDocs;
+              });
+              
+              setSelectedDocuments(prev => {
+                const newSelected = { ...prev };
+                delete newSelected[recordId];
+                return newSelected;
+              });
+            }
+          }
+        ]
+      );
+      
+    } catch (error) {
+      console.error('Error assigning document:', error);
+      Alert.alert('Assignment Failed', error.message);
+    } finally {
+      setAssignmentLoading(prev => ({ ...prev, [recordId]: false }));
+    }
+  };
+
+  // Check if record needs assignment
+  const needsDocumentAssignment = (record) => {
+    return record.document_type === "Manual Entry" && record.sub_document_type === "Pending Assignment";
+  };
+
+  // Check if assignment window is open (12 hours)
+  const isAssignmentWindowOpen = (record) => {
+    try {
+      const entryDateTime = new Date(`${record.date}T${record.time}`);
+      const now = new Date();
+      const timeDiff = now - entryDateTime;
+      return timeDiff <= 12 * 60 * 60 * 1000; // 12 hours in ms
+    } catch (error) {
+      return false;
+    }
+  };
+
+  // ✅ NEW: Render inline document dropdown
+  const renderDocumentDropdown = (record) => {
+    if (!needsDocumentAssignment(record)) {
+      return (
+        <Text style={styles.assignedDocumentText}>
+          {record.document_type || '--'}
+        </Text>
+      );
+    }
+
+    if (!isAssignmentWindowOpen(record)) {
+      return <Text style={styles.expiredText}>⚫ Expired</Text>;
+    }
+
+    const recordId = record.id;
+    const documents = availableDocuments[recordId] || [];
+    const selectedDoc = selectedDocuments[recordId];
+    const isLoading = assignmentLoading[recordId];
+
+    // Load documents when dropdown is first rendered
+    React.useEffect(() => {
+      if (needsDocumentAssignment(record) && isAssignmentWindowOpen(record)) {
+        loadAvailableDocuments(record.vehicle_no, recordId);
+      }
+    }, [record.vehicle_no, recordId]);
+
+    if (isLoading) {
+      return (
+        <View style={styles.loadingCell}>
+          <ActivityIndicator size="small" color="#007bff" />
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.inlinePickerContainer}>
+        <Picker
+          selectedValue={selectedDoc || ''}
+          onValueChange={(value) => {
+            if (value) {
+              setSelectedDocuments(prev => ({
+                ...prev,
+                [recordId]: value
+              }));
+            }
+          }}
+          style={styles.inlinePicker}
+          mode="dropdown"
+        >
+          <Picker.Item label="Select Document" value="" />
+          {documents.map((doc) => (
+            <Picker.Item 
+              key={doc.document_no} 
+              label={`${doc.document_no} - ${doc.document_type}`} 
+              value={doc.document_no} 
+            />
+          ))}
+        </Picker>
+      </View>
+    );
+  };
+
+  // ✅ NEW: Render submit button
+  const renderSubmitButton = (record) => {
+    if (!needsDocumentAssignment(record) || !isAssignmentWindowOpen(record)) {
+      const editButtonConfig = editStatusUtils.getButtonConfig(record);
+      return renderEditButton(record, editButtonConfig);
+    }
+
+    const recordId = record.id;
+    const selectedDoc = selectedDocuments[recordId];
+    const isLoading = assignmentLoading[recordId];
+
+    return (
+      <TouchableOpacity
+        style={[
+          styles.submitButton,
+          (!selectedDoc || isLoading) && styles.submitButtonDisabled
+        ]}
+        onPress={() => handleDocumentAssignment(recordId, selectedDoc)}
+        disabled={!selectedDoc || isLoading}
+      >
+        {isLoading ? (
+          <ActivityIndicator size="small" color="#fff" />
+        ) : (
+          <Text style={styles.submitButtonText}>
+            {selectedDoc ? 'Submit' : 'Select First'}
+          </Text>
+        )}
+      </TouchableOpacity>
+    );
+  };
+
+  // Existing edit modal handlers
   const openEditModal = (record) => {
     setEditingRecord(record);
     setEditModalVisible(true);
   };
 
-  // ✅ NEW: Close edit modal
   const closeEditModal = () => {
     setEditModalVisible(false);
     setEditingRecord(null);
   };
 
-  // ✅ NEW: Handle successful edit
   const handleEditSuccess = (response) => {
-    // Refresh the movements list
     loadMovements();
     loadEditStatistics();
-    
-    console.log('Edit successful:', response);
   };
 
-  // ✅ NEW: Render 3-color edit button
-  const renderEditButton = (record) => {
-    const buttonConfig = editStatusUtils.getButtonConfig(record);
-    
-    // Button color mapping
+  const renderEditButton = (record, buttonConfig) => {
     const colorStyles = {
       yellow: styles.completeInfoButton,
       green: styles.editDetailsButton,
@@ -212,7 +386,6 @@ const SecurityInsightsTab = ({
     );
   };
 
-  // ✅ NEW: Render operational data cell with completion indicators
   const renderOperationalCell = (record, field) => {
     const value = record[field];
     const hasValue = value && value.trim();
@@ -229,12 +402,40 @@ const SecurityInsightsTab = ({
     );
   };
 
+  const stats = React.useMemo(() => {
+    if (!movements || movements.length === 0) {
+      return { totalMovements: 0, uniqueVehicles: 0, needsCompletion: 0, completeAndEditable: 0, expired: 0 };
+    }
+    
+    const uniqueVehicles = [...new Set(movements.map(m => m.vehicle_no))].length;
+    const needsCompletion = movements.filter(m => 
+      editStatusUtils.getButtonConfig(m).action === 'complete_required'
+    ).length;
+    const completeAndEditable = movements.filter(m => 
+      editStatusUtils.getButtonConfig(m).action === 'edit_optional'
+    ).length;
+    const expired = movements.filter(m => 
+      editStatusUtils.getButtonConfig(m).action === 'view_only'
+    ).length;
+    
+    return { totalMovements: movements.length, uniqueVehicles, needsCompletion, completeAndEditable, expired };
+  }, [movements, editStatistics]);
+
   return (
     <View style={styles.container}>
-      {/* Card Container */}
       <View style={styles.card}>
         
-        {/* ✅ UPDATED: Enhanced 4x1 Stats Cards with operational focus */}
+        {/* ✅ NEW: Unassigned Count Display */}
+        <View style={styles.unassignedCountBanner}>
+          <Text style={styles.unassignedCountText}>
+            📋 Unassigned Documents: {unassignedCount}
+          </Text>
+          <Text style={styles.unassignedCountSubtext}>
+            Manual entries requiring document assignment within 12 hours
+          </Text>
+        </View>
+
+        {/* Stats Cards */}
         <View style={styles.statsCardsContainer}>
           <View style={styles.statsRowContainer}>
             <View style={styles.statCard}>
@@ -256,9 +457,8 @@ const SecurityInsightsTab = ({
           </View>
         </View>
         
-        {/* Enhanced Filters */}
+        {/* Filters */}
         <View style={styles.filters}>
-          {/* From Date with Calendar */}
           <View style={styles.filterItem}>
             <Text style={styles.filterLabel}>From Date</Text>
             <TouchableOpacity 
@@ -280,7 +480,6 @@ const SecurityInsightsTab = ({
             )}
           </View>
           
-          {/* To Date with Calendar */}
           <View style={styles.filterItem}>
             <Text style={styles.filterLabel}>To Date</Text>
             <TouchableOpacity 
@@ -302,7 +501,6 @@ const SecurityInsightsTab = ({
             )}
           </View>
 
-          {/* Vehicle Number Filter */}
           <View style={styles.filterItem}>
             <Text style={styles.filterLabel}>Vehicle Number</Text>
             <TextInput
@@ -314,7 +512,6 @@ const SecurityInsightsTab = ({
             />
           </View>
 
-          {/* Search Button */}
           <View style={styles.filterItem}>
             <TouchableOpacity 
               style={styles.searchButton}
@@ -330,52 +527,26 @@ const SecurityInsightsTab = ({
           </View>
         </View>
 
-        {/* ✅ NEW: Operational summary stats */}
-        <View style={styles.operationalSummary}>
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Completion Rate:</Text>
-            <Text style={[styles.summaryValue, {color: '#28a745'}]}>
-              {editStatistics ? `${editStatistics.completion_percentage}%` : '--'}
-            </Text>
-          </View>
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Avg Edits:</Text>
-            <Text style={styles.summaryValue}>
-              {editStatistics?.avg_edits_per_record || 0}
-            </Text>
-          </View>
-          <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Edited Today:</Text>
-            <Text style={[styles.summaryValue, {color: '#007bff'}]}>
-              {editStatistics?.edited_today || 0}
-            </Text>
-          </View>
-        </View>
+        <Text style={styles.sectionTitle}>Document Assignment & Operational Data</Text>
 
-        {/* Section Title */}
-        <Text style={styles.sectionTitle}>Operational Data Management</Text>
-
-        {/* ✅ UPDATED: Enhanced Table with Operational Fields */}
+        {/* ✅ INLINE TABLE with Native Dropdowns */}
         <ScrollView horizontal style={styles.tableScrollContainer}>
           <View style={styles.tableContainer}>
             
-            {/* Table Header - UPDATED with operational columns */}
+            {/* Table Header */}
             <View style={styles.tableHeader}>
               <Text style={[styles.tableHeaderCell, styles.colGateEntry]}>Gate Entry No</Text>
               <Text style={[styles.tableHeaderCell, styles.colVehicle]}>Vehicle No</Text>
               <Text style={[styles.tableHeaderCell, styles.colMovement]}>Movement</Text>
               <Text style={[styles.tableHeaderCell, styles.colDate]}>Date</Text>
               <Text style={[styles.tableHeaderCell, styles.colTime]}>Time</Text>
-              
-              {/* ✅ NEW: Operational Data Columns */}
+              <Text style={[styles.tableHeaderCell, styles.colDocumentDropdown]}>Document Assignment</Text>
+              <Text style={[styles.tableHeaderCell, styles.colDocumentType]}>Document Type</Text>
               <Text style={[styles.tableHeaderCell, styles.colDriverName]}>Driver Name</Text>
               <Text style={[styles.tableHeaderCell, styles.colKMReading]}>KM Reading</Text>
               <Text style={[styles.tableHeaderCell, styles.colLoaderNames]}>Loader Names</Text>
-              
               <Text style={[styles.tableHeaderCell, styles.colWarehouse]}>Warehouse</Text>
               <Text style={[styles.tableHeaderCell, styles.colSecurity]}>Security Guard</Text>
-              <Text style={[styles.tableHeaderCell, styles.colEditCount]}>Edit Count</Text>
-              <Text style={[styles.tableHeaderCell, styles.colTimeRemaining]}>Time Remaining</Text>
               <Text style={[styles.tableHeaderCell, styles.colActions]}>Actions</Text>
             </View>
 
@@ -387,18 +558,17 @@ const SecurityInsightsTab = ({
               </View>
             ) : movements.length === 0 ? (
               <View style={styles.noDataContainer}>
-                <Text style={styles.noDataText}>No movements found for the selected filters</Text>
+                <Text style={styles.noDataText}>No movements found</Text>
               </View>
             ) : (
               movements.map((movement, index) => {
-                const buttonConfig = editStatusUtils.getButtonConfig(movement);
+                const needsAssignment = needsDocumentAssignment(movement);
                 
                 return (
                   <View key={movement.id || index} style={[
                     styles.tableRow,
                     index % 2 === 0 ? styles.evenRow : styles.oddRow,
-                    // ✅ NEW: Priority-based row highlighting
-                    buttonConfig.priority === 'high' && styles.highPriorityRow
+                    needsAssignment && styles.pendingAssignmentRow // ✅ YELLOW HIGHLIGHTING
                   ]}>
                     <Text style={[styles.tableCell, styles.colGateEntry]}>{movement.gate_entry_no}</Text>
                     <Text style={[styles.tableCell, styles.colVehicle]}>{movement.vehicle_no || '--'}</Text>
@@ -408,7 +578,15 @@ const SecurityInsightsTab = ({
                     </Text>
                     <Text style={[styles.tableCell, styles.colTime]}>{movement.time}</Text>
                     
-                    {/* ✅ NEW: Operational Data Cells with completion indicators */}
+                    {/* ✅ INLINE DROPDOWN CELL */}
+                    <View style={[styles.tableCell, styles.colDocumentDropdown]}>
+                      {renderDocumentDropdown(movement)}
+                    </View>
+                    
+                    <Text style={[styles.tableCell, styles.colDocumentType]}>
+                      {movement.document_type || '--'}
+                    </Text>
+                    
                     <View style={[styles.tableCell, styles.colDriverName]}>
                       {renderOperationalCell(movement, 'driver_name')}
                     </View>
@@ -422,29 +600,9 @@ const SecurityInsightsTab = ({
                     <Text style={[styles.tableCell, styles.colWarehouse]}>{movement.warehouse_name}</Text>
                     <Text style={[styles.tableCell, styles.colSecurity]}>{movement.security_name}</Text>
                     
-                    {/* ✅ NEW: Edit count with visual indicator */}
-                    <Text style={[
-                      styles.tableCell, 
-                      styles.colEditCount,
-                      movement.edit_count > 0 ? { color: '#28a745', fontWeight: 'bold' } : { color: '#6c757d' }
-                    ]}>
-                      {movement.edit_count || 0}
-                    </Text>
-                    
-                    {/* ✅ NEW: Time remaining with color coding */}
-                    <Text style={[
-                      styles.tableCell, 
-                      styles.colTimeRemaining,
-                      buttonConfig.priority === 'high' ? { color: '#dc3545', fontWeight: 'bold' } :
-                      buttonConfig.priority === 'medium' ? { color: '#ffc107', fontWeight: 'bold' } :
-                      { color: '#6c757d' }
-                    ]}>
-                      {movement.time_remaining || 'Expired'}
-                    </Text>
-                    
-                    {/* ✅ NEW: 3-Color Edit Button */}
+                    {/* ✅ SUBMIT BUTTON CELL */}
                     <View style={[styles.tableCell, styles.colActions]}>
-                      {renderEditButton(movement)}
+                      {renderSubmitButton(movement)}
                     </View>
                   </View>
                 );
@@ -454,7 +612,7 @@ const SecurityInsightsTab = ({
         </ScrollView>
       </View>
 
-      {/* ✅ NEW: Operational Edit Modal */}
+      {/* Existing Operational Edit Modal */}
       <OperationalEditModal
         visible={editModalVisible}
         record={editingRecord}
